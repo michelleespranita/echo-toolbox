@@ -1,0 +1,17 @@
+echo:
+  # input data
+  img_size: 224
+  num_frames: 16
+  num_channels: 3
+  
+  # model
+  model_name: echoprime # or echoprime (echoprime)
+
+  # use gradient checkpoint
+  use_checkpoint: true
+
+  use_global_token: true
+
+  view_dropout:
+    use: false
+    mask_ratio: 0.0

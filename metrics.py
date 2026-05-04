@@ -19,36 +19,51 @@ class Metrics():
     ):
         self.device = device
         self.metrics = {}
+        self._metric_has_data = {name: False for name, metric in self.metrics.items()}
     
-    def update(self, pred: torch.Tensor, label: torch.Tensor) -> None:
+    def update(self, pred: torch.Tensor, label: torch.Tensor, mask: Optional[torch.Tensor] = None) -> None:
         for name, metric in self.metrics.items():
-            pred_proc, label_proc = self._prepare_inputs(name, pred, label)
+            pred_proc, label_proc = self._prepare_inputs(name, pred, label, mask)
+            if pred_proc is None:
+                continue
             metric.update(pred_proc, label_proc)
+            self._metric_has_data[name] = True
         
-    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor):
+    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor, mask: Optional[torch.Tensor] = None):
         # Default: do nothing
         return pred, label
+
+    def _safe_compute_metric(self, metric: Metric):
+        try:
+            return metric.compute()
+        except ValueError as e:
+            error_msg = str(e).lower()
+            # Some regression/correlation metrics require at least 2 samples.
+            if 'at least two samples' in error_msg:
+                return float('nan')
+            raise
     
     def compute(self) -> dict:
         metrics_dict = {}
         for metric_name, metric in self.metrics.items():
-            metrics_dict[metric_name] = metric.compute()
+            metrics_dict[metric_name] = self._safe_compute_metric(metric) if self._metric_has_data[metric_name] else float('nan')
         return metrics_dict
     
     def reset(self) -> None:
         for metric in self.metrics.values():
             metric.reset()
+        self._metric_has_data = {name: False for name in self._metric_has_data}
     
     def get(self, name: str) -> float:
         if name not in self.metrics:
             raise ValueError(f"Metric {name} not found. Available: {list(self.metrics.keys())}")
-        return self.metrics[name].compute()
+        return self._safe_compute_metric(self.metrics[name])
 
 class RegressionMetrics(Metrics):
     def __init__(
         self,
         device: Optional[torch.device] = torch.device('cpu'),
-        num_outputs: int = None
+        num_outputs: Optional[int] = None
     ):
         super().__init__(device)
 
@@ -60,10 +75,37 @@ class RegressionMetrics(Metrics):
         self.metrics = {
             'mae': MeanAbsoluteError().to(device),
             'mse': MeanSquaredError().to(device),
-            'r2': R2Score(self.num_outputs, multioutput='uniform_average').to(device),
-            'r2_per_output': R2Score(self.num_outputs, multioutput='raw_values').to(device),
-            'pcc': PearsonCorrCoef(self.num_outputs).to(device)
+            'r2': R2Score(multioutput='uniform_average').to(device), # num_outputs is not automatically inferred from the shape of input tensors
+            'pcc': PearsonCorrCoef(num_outputs=self.num_outputs).to(device)
         }
+        self._metric_has_data = {name: False for name, metric in self.metrics.items()}
+
+        if num_outputs > 1:
+            self.metrics['r2_per_output'] = R2Score(multioutput='raw_values').to(device)
+    
+    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        """
+        mask: 1 for NaN (ignore), 0 for valid (calculate).
+        """
+        if mask is None:
+            if not (label == -100).any():
+                return pred, label
+            mask = ~(label == -100) # (B, num_outputs). True where valid, False where invalid
+        else:
+            mask = ~(mask.bool()) # True where valid, False where invalid
+        
+        if mask.sum() < 2: # not enough valid samples to compute metric, e.g. r2 requires at least 2 samples
+            return None, None # handled by Metrics class
+        
+        pred_valid = pred[mask]
+        label_valid = label[mask]
+
+        # R² and PCC are undefined when all labels are identical
+        if name in ('r2', 'r2_per_output', 'pcc'):
+            if label_valid.unique().numel() == 1:
+                return None, None  # will produce nan in compute()
+
+        return pred_valid, label_valid # (num_valid,)
 
 class BinaryClassificationMetrics(Metrics):
     def __init__(
@@ -74,15 +116,16 @@ class BinaryClassificationMetrics(Metrics):
 
         self.metrics = {
             'accuracy': Accuracy(task='binary').to(device),
-            'balanced_accuracy': Recall(task='binary', average='macro').to(device),
+            'balanced_accuracy': Accuracy(task='multiclass', average='macro', num_classes=2).to(device),
             'f1': F1Score(task='binary').to(device),
             'precision': Precision(task='binary').to(device),
             'recall': Recall(task='binary').to(device),
             'auroc': AUROC(task='binary').to(device),
             'auprc': AveragePrecision(task='binary').to(device),
         }
+        self._metric_has_data = {name: False for name, metric in self.metrics.items()}
     
-    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor): # pred: logits
+    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor, mask: Optional[torch.Tensor] = None): # pred: logits
         probs = torch.sigmoid(pred)
         label = label.long()
 
@@ -107,15 +150,17 @@ class MulticlassClassificationMetrics(Metrics):
             self.num_classes = num_classes
 
         self.metrics = {
-            'accuracy': Accuracy(task='multiclass', average='macro', num_classes=self.num_classes).to(device), # balanced accuracy
+            'accuracy': Accuracy(task='multiclass', average='micro', num_classes=self.num_classes).to(device),
+            'balanced_accuracy': Accuracy(task='multiclass', average='macro', num_classes=self.num_classes).to(device),
             'f1': F1Score(task='multiclass', average='macro', num_classes=self.num_classes).to(device),
             'precision': Precision(task='multiclass', average='macro', num_classes=self.num_classes).to(device),
             'recall': Recall(task='multiclass', average='macro', num_classes=self.num_classes).to(device),
             'auroc': AUROC(task='multiclass', average='macro', num_classes=self.num_classes).to(device),
             'auprc': AveragePrecision(task='multiclass', average='macro', num_classes=self.num_classes).to(device),
         }
+        self._metric_has_data = {name: False for name, metric in self.metrics.items()}
     
-    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor): # pred: logits
+    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor, mask: Optional[torch.Tensor] = None): # pred: logits
         # logits -> probabilities
         probs = torch.softmax(pred, dim=-1)
         pred = probs
@@ -143,10 +188,12 @@ class MultilabelClassificationMetrics(Metrics):
             'precision': MultilabelPrecision(num_labels=self.num_labels, average='macro').to(device),
             'recall': MultilabelRecall(num_labels=self.num_labels, average='macro').to(device),
             'auroc': MultilabelAUROC(num_labels=self.num_labels, average='macro').to(device),
+            'auroc_per_output': MultilabelAUROC(num_labels=self.num_labels, average='none').to(device),
             'auprc': MultilabelAveragePrecision(num_labels=self.num_labels, average='macro').to(device),
         }
+        self._metric_has_data = {name: False for name, metric in self.metrics.items()}
     
-    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor):
+    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor, mask: Optional[torch.Tensor] = None):
         # logits -> probs via sigmoid
         probs = torch.sigmoid(pred)
         label = label.long()
@@ -157,6 +204,58 @@ class MultilabelClassificationMetrics(Metrics):
             pred = probs
 
         return pred, label
+
+class MultiHeadBinaryClassificationMetrics(Metrics):
+    def __init__(
+        self,
+        device = torch.device('cpu'),
+        num_tasks: int = None
+    ):
+        super().__init__(device)
+        
+        if num_tasks is None:
+            self.num_tasks = 1
+        else:
+            self.num_tasks = num_tasks
+        
+        self.task_names = [i for i in range(self.num_tasks)]
+
+        self.metrics = {
+            # 'accuracy': MultilabelAccuracy(num_labels=self.num_tasks, average=None).to(device),
+            'f1': MultilabelF1Score(num_labels=self.num_tasks, average=None).to(device),
+            # 'precision': MultilabelPrecision(num_labels=self.num_tasks, average=None).to(device),
+            # 'recall': MultilabelRecall(num_labels=self.num_tasks, average=None).to(device),
+            'auroc': MultilabelAUROC(num_labels=self.num_tasks, average=None).to(device),
+            # 'auprc': MultilabelAveragePrecision(num_labels=self.num_tasks, average=None).to(device),
+        }
+        self._metric_has_data = {name: False for name, metric in self.metrics.items()}
+    
+    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        # logits -> probs via sigmoid
+        probs = torch.sigmoid(pred)
+        label = label.long()
+        
+        if name in ['accuracy', 'f1', 'precision', 'recall']:
+            pred = (probs > 0.5).long()  # thresholded preds
+        elif name in ['auroc', 'auprc']:
+            pred = probs
+
+        return pred, label
+
+    def compute(self) -> dict:
+        metrics_dict = {}
+        for metric_name, metric in self.metrics.items():
+            task_values = metric.compute()
+            
+            # mean of the metric across all tasks
+            metrics_dict[metric_name] = task_values.mean()
+            
+            # the metric for each task
+            for i, val in enumerate(task_values):
+                task_tag = self.task_names[i]
+                metrics_dict[f'{metric_name}_{task_tag}'] = val
+                
+        return metrics_dict
 
 class SegmentationMetrics(Metrics):
     def __init__(
@@ -179,8 +278,9 @@ class SegmentationMetrics(Metrics):
             'dice_per_output': DiceScore(self.num_classes, include_background=False, average='none', aggregation_level='samplewise').to(device),
             'iou_per_output': MeanIoU(self.num_classes, include_background=False, per_class=True).to(device)
         }
+        self._metric_has_data = {name: False for name, metric in self.metrics.items()}
     
-    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor):
+    def _prepare_inputs(self, name: str, pred: torch.Tensor, label: torch.Tensor, mask: Optional[torch.Tensor] = None):
         """
         pred: (B, num_classes, T, H, W)
         label: (B, T, H, W) and contains class numbers

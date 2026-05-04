@@ -1,0 +1,92 @@
+modality: echo
+task_type: regression
+dataset: echonet_dynamic
+
+img_size: 224
+num_frames: 16
+num_channels: 3
+sampling_rate: 2
+
+apply_augmentations: true
+augmentations:
+  random_horizontal_flip: 0.5
+  random_vertical_flip: 0.5
+  random_rotation: [0, 0]
+  random_crop_size: 112
+
+target: ef
+target_list:
+  ef:
+    lower_bound: 0
+    upper_bound: 1
+  esv:
+    lower_bound: 1
+    upper_bound: 2
+  edv:
+    lower_bound: 2
+    upper_bound: 3
+
+# Head
+num_head_layers: 1
+head_dropout: 0.0
+non_linearity: leaky_relu
+num_classes: 1
+
+batch_size: 16
+accum_iter: 2
+num_workers: 8
+max_epochs: 20
+
+params:
+  lr: 5e-4
+  weight_decay: 0.01
+  layer_decay: 0.75
+  optimizer:
+    adamw:
+      use: true
+      betas: [0.9, 0.999]
+    lars:
+      use: false
+      momentum: 0.9
+      nesterov: true
+    adam:
+      use: false
+      betas: [0.9, 0.999]
+    sgd:
+      use: false
+      momentum: 0.9
+      nesterov: true
+  scheduler:
+    warmup_cosine:
+      use: true
+      warmup_steps: 5
+      total_steps: ${downstream_task_echo.max_epochs}
+      min_lr_factor: 0.02 # 0.1
+    cosine:
+      use: false
+      T_max: 200
+      eta_min: 0.01  
+    step:
+      use: false
+      step_size: 60
+      gamma: 0.1
+    exponential:
+      use: false
+      gamma: 0.95
+      
+  early_stopping:
+    use: false
+    patience: 8
+    min_delta: 0.075
+
+paths:
+  type: "_100"
+
+  data_train: ${home_dir}/datasets/EchoNet-Dynamic/lvef_regression/train${downstream_task_echo.paths.type}_with_std_labels.csv
+  labels_train: ${home_dir}/datasets/EchoNet-Dynamic/lvef_regression/labels_train${downstream_task_echo.paths.type}.pt
+
+  data_val: ${home_dir}/datasets/EchoNet-Dynamic/lvef_regression/val_with_std_labels.csv
+  labels_val: ${home_dir}/datasets/EchoNet-Dynamic/lvef_regression/labels_val.pt
+
+  data_test: ${home_dir}/datasets/EchoNet-Dynamic/lvef_regression/test_with_std_labels.csv
+  labels_test: ${home_dir}/datasets/EchoNet-Dynamic/lvef_regression/labels_test.pt

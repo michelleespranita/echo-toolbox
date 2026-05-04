@@ -1,0 +1,6 @@
+task: echo_finetune
+
+encoder:
+  echo:
+    checkpoint_path:
+    freeze_first_n_layers: 0

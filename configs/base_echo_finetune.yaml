@@ -1,0 +1,34 @@
+defaults:
+  - _self_
+  - dataset: echo/dataset_finetune
+  - model: echo/model_finetune
+  - train: echo/finetune
+  - downstream_task_echo: lvef_regression_echonet_dynamic
+
+seed: 42
+
+home_dir: /home/michellel
+model_dir: /home/michellel/repos/EchoTab
+experiment_name:
+
+# Training
+num_gpus: 1
+save_top_k: 1
+check_val_every_n_epoch: 1
+log_every_n_steps: 10
+grad_accumulation_steps: 1
+
+# Test
+test: false
+
+# Logging
+save_dir: ${home_dir}/training_logs/echotab/
+
+# Checkpoints
+encoder_project_name:
+encoder_experiment_name:
+
+# Echo encoder checkpoint path
+# echo_encoder_checkpoint_path:
+# echo_encoder_checkpoint_path: ${model_dir}/model_weights/echo_prime_encoder.pt
+echo_encoder_checkpoint_path: ${save_dir}/${encoder_project_name}/${encoder_experiment_name}/checkpoints/echo_multimodal.ckpt
